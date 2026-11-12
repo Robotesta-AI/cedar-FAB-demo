@@ -18,3 +18,18 @@ export function demo(now: Date = DEMO_NOW, settings?: Settings) {
   });
   return { clock, store, app, as };
 }
+
+type Demo = ReturnType<typeof demo>;
+
+/** Sends a transfer through the API, typing the one-time code when one is asked for. */
+export async function send(d: Demo, userId: string, body: { sourceAccountId: string; beneficiaryId: string; amount: string }, channel: "web" | "mobile" = "web") {
+  const first = await d.as(userId, channel).post("/api/transfers", body);
+  if (first.status !== 202) return first;
+  const code = /code is (\d{6})/.exec(d.store.outbox.at(-1)?.text ?? "")?.[1] ?? "";
+  return d.as(userId, channel).post("/api/transfers/code", { challengeId: first.body.challengeId, code });
+}
+
+/** "12345.67" from minor units. */
+export function amountText(minor: number): string {
+  return (minor / 100).toFixed(2);
+}

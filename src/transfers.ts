@@ -3,6 +3,7 @@ import { parseAmount, type Minor } from "./money.js";
 import { transferFee } from "./fees.js";
 import { withinNewBeneficiaryCap } from "./newBeneficiary.js";
 import { notifyTransferSent } from "./notifications.js";
+import { withinDailyLimit } from "./limits.js";
 import type { Store } from "./store.js";
 
 /** What a customer asks for. */
@@ -20,7 +21,8 @@ export type TransferRefusal =
   | "BENEFICIARY_NOT_FOUND"
   | "INSUFFICIENT_BALANCE"
   | "NEW_BENEFICIARY_CAP"
-  | "TRANSFERS_LOCKED";
+  | "TRANSFERS_LOCKED"
+  | "DAILY_LIMIT_EXCEEDED";
 
 /** BRD 3.1 rule 14: what the confirmation screen shows before the customer confirms. */
 export interface TransferQuote {
@@ -55,6 +57,9 @@ export function quoteTransfer(store: Store, user: User, request: TransferRequest
   if (!beneficiary) return { ok: false, refusal: "BENEFICIARY_NOT_FOUND" };
   // BRD 2.3 (FAB-9): at most 10,000 EGP in total to a beneficiary added less than 24 hours ago.
   if (!withinNewBeneficiaryCap(store, beneficiary, amount, store.clock.now())) return { ok: false, refusal: "NEW_BENEFICIARY_CAP" };
+  // BRD 4.1 rules 25-27: the daily limit, per customer, across accounts and channels.
+  const customer = store.customer(user.customerId);
+  if (customer && !withinDailyLimit(store, customer, amount, store.clock.now())) return { ok: false, refusal: "DAILY_LIMIT_EXCEEDED" };
   const fee = transferFee(amount);
   const total = amount + fee;
   // BRD 3.1 rule 13: more than the available balance is refused and nothing is debited.
@@ -97,5 +102,6 @@ export const REFUSAL_WORDS: Record<TransferRefusal, string> = {
   BENEFICIARY_NOT_FOUND: "Choose one of your beneficiaries.",
   INSUFFICIENT_BALANCE: "The amount and fee are more than the available balance. Nothing was debited.",
   NEW_BENEFICIARY_CAP: "For 24 hours after a beneficiary is added you can send them at most 10,000 EGP in total. For an urgent larger payment, please visit a branch.",
+  DAILY_LIMIT_EXCEEDED: "This transfer would take you above today's limit of 100,000 EGP across all your accounts, on web and mobile. Nothing was debited.",
   TRANSFERS_LOCKED: "Transfers are locked for 15 minutes after three wrong codes. Try again later.",
 };
