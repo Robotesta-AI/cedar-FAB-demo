@@ -1,5 +1,5 @@
 import express, { type NextFunction, type Request, type Response } from "express";
-import { APPROVAL_REFUSAL_WORDS, approveTransfer, createCorporateTransfer, pendingForChecker } from "./approvals.js";
+import { APPROVAL_REFUSAL_WORDS, approveTransfer, createCorporateTransfer, pendingForChecker, rejectTransfer } from "./approvals.js";
 import { BENEFICIARY_REFUSAL_WORDS, addBeneficiary } from "./beneficiaries.js";
 import type { Channel, Transfer, User } from "./model.js";
 import { DAILY_LIMIT, remainingToday, sentToday } from "./limits.js";
@@ -210,6 +210,12 @@ export function createApp(store: Store): express.Express {
     res.send(approvalsPage(store, req.user!));
   });
 
+  app.post("/approvals/:id/reject", signedIn, (req, res) => {
+    const result = rejectTransfer(store, req.user!, String(req.params.id), String(req.body?.reason ?? ""));
+    if (!result.ok) return res.status(422).send(approvalsPage(store, req.user!, wordsFor(result.refusal)));
+    return res.send(approvalsPage(store, req.user!, undefined, `Rejected: ${result.transfer.reference}. Nothing was debited.`));
+  });
+
   app.post("/approvals/:id/approve", signedIn, (req, res) => {
     const result = approveTransfer(store, req.user!, String(req.params.id));
     if (result.ok === "CODE_REQUIRED") return res.send(codeForm(req.user!, result.challengeId));
@@ -306,6 +312,12 @@ export function createApp(store: Store): express.Express {
     return res.json(result.transfer);
   });
 
+  app.post("/api/approvals/:id/reject", signedIn, (req, res) => {
+    const result = rejectTransfer(store, req.user!, String(req.params.id), String(req.body?.reason ?? ""));
+    if (!result.ok) return res.status(422).json({ error: result.refusal });
+    return res.json(result.transfer);
+  });
+
   app.get("/api/limits/today", signedIn, (req, res) => {
     const customer = store.customer(req.user!.customerId)!;
     if (customer.kind !== "RETAIL") return res.json({ limit: null });
@@ -352,7 +364,8 @@ function approvalsPage(store: Store, user: User, error?: string, notice?: string
   const rows = pendingForChecker(store, user)
     .map(
       (t) => `<tr><td>${escapeHtml(t.reference)}</td><td>${escapeHtml(store.user(t.userId)?.name ?? "")}</td><td>${escapeHtml(t.beneficiaryName)}</td><td>${formatMoney(t.amount)}</td><td>${escapeHtml(t.expiresAt?.toISOString() ?? "")}</td>
-        <td><form method="post" action="/approvals/${escapeHtml(t.id)}/approve"><button>Approve</button></form></td></tr>`,
+        <td><form method="post" action="/approvals/${escapeHtml(t.id)}/approve"><button>Approve</button></form>
+            <form method="post" action="/approvals/${escapeHtml(t.id)}/reject"><input name="reason" placeholder="Reason" required><button>Reject</button></form></td></tr>`,
     )
     .join("");
   return page(
