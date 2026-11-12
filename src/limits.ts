@@ -31,3 +31,8 @@ export function withinDailyLimit(store: Store, customer: Customer, amount: Minor
   if (customer.kind !== "RETAIL") return true;
   return sentToday(store, customer.id, now) + amount <= DAILY_LIMIT;
 }
+
+/** BRD 4.1 rule 29: how much the customer can still send today, never below zero. */
+export function remainingToday(store: Store, customerId: string, now: Date): Minor {
+  return Math.max(0, DAILY_LIMIT - sentToday(store, customerId, now));
+}
