@@ -1,6 +1,7 @@
 import express, { type NextFunction, type Request, type Response } from "express";
 import { BENEFICIARY_REFUSAL_WORDS, addBeneficiary } from "./beneficiaries.js";
 import type { Channel, User } from "./model.js";
+import { DAILY_LIMIT, remainingToday, sentToday } from "./limits.js";
 import { formatMoney } from "./money.js";
 import { removeBeneficiary } from "./removeBeneficiary.js";
 import { CODE_REFUSAL_WORDS, confirmCode, submitTransfer } from "./oneTimeCode.js";
@@ -232,6 +233,13 @@ export function createApp(store: Store): express.Express {
     return res.status(201).json(result.transfer);
   });
 
+  app.get("/api/limits/today", signedIn, (req, res) => {
+    const customer = store.customer(req.user!.customerId)!;
+    if (customer.kind !== "RETAIL") return res.json({ limit: null });
+    const now = store.clock.now();
+    return res.json({ limit: DAILY_LIMIT, sent: sentToday(store, customer.id, now), remaining: remainingToday(store, customer.id, now) });
+  });
+
   app.get("/api/transfers", signedIn, (req, res) => {
     res.json(store.transfersOf(req.user!.customerId));
   });
@@ -273,9 +281,14 @@ function transferForm(store: Store, user: User, error?: string): string {
     .beneficiariesOf(user.customerId)
     .map((b) => `<option value="${escapeHtml(b.id)}">${escapeHtml(b.name)}</option>`)
     .join("");
+  // FAB-8 (BRD 4.1 rule 29): the transfer page shows how much can still be sent today.
+  const remaining =
+    store.customer(user.customerId)?.kind === "RETAIL"
+      ? `<p class="notice" data-testid="remaining-today">You can still send ${formatMoney(remainingToday(store, user.customerId, store.clock.now()))} today, across all your accounts on web and mobile.</p>`
+      : "";
   return page(
     "Send money",
-    `${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+    `${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}${remaining}
      <section><form method="post" action="/transfer/confirm">
        <label for="from">From</label><select id="from" name="sourceAccountId">${accounts}</select>
        <label for="to">To</label><select id="to" name="beneficiaryId">${beneficiaries}</select>
