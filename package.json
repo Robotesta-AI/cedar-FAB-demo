@@ -1,0 +1,30 @@
+{
+  "name": "cedar-pay",
+  "version": "1.2.0",
+  "private": true,
+  "description": "Cedar Pay: a fictional bank's transfer app, built as a demonstration. Every bank, person, account and figure in it is invented.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:ci": "vitest run --reporter=default --reporter=junit --outputFile.junit=test-results/junit.xml"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^22.7.4",
+    "@types/supertest": "^6.0.3",
+    "supertest": "^7.1.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.12"
+  },
+  "packageManager": "pnpm@10.15.0"
+}
