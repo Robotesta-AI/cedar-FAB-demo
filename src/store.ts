@@ -1,3 +1,4 @@
+import type { AuditEntry } from "./auditLog.js";
 import type { Clock } from "./clock.js";
 import { SimulatedCoreBanking } from "./coreBanking.js";
 import type { Account, Beneficiary, Customer, Transfer, User } from "./model.js";
@@ -18,6 +19,8 @@ export class Store {
   transfers: Transfer[] = [];
   /** Notifications "sent" to customers (push, e-mail, SMS). A demonstration outbox: nothing leaves the app. */
   notifications: Notification[] = [];
+  /** FAB-22: the append-only audit log of corporate approvals. */
+  readonly auditLog: AuditEntry[] = [];
   codeChallenges: CodeChallenge[] = [];
   /** Messages "sent" to customers' registered phones. A demonstration outbox: nothing leaves the app. */
   outbox: { to: string; text: string; at: Date }[] = [];

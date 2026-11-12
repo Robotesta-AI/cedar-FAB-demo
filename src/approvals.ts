@@ -1,5 +1,6 @@
 import type { Transfer, User } from "./model.js";
 import { ONE_TIME_CODE_THRESHOLD, issueCode } from "./oneTimeCode.js";
+import { writeAudit } from "./auditLog.js";
 import { notifyTransferSent } from "./notifications.js";
 import type { Store } from "./store.js";
 import { quoteTransfer, type TransferRefusal, type TransferRequest } from "./transfers.js";
@@ -76,7 +77,21 @@ export function approveTransfer(store: Store, checker: User, transferId: string,
   transfer.status = "SENT";
   transfer.sentAt = now;
   transfer.approvedBy = checker.id;
+  writeAudit(store, checker, "APPROVED", transfer);
   notifyTransferSent(store, transfer);
+  return { ok: true, transfer };
+}
+
+/** FAB-22: a checker rejects a pending corporate transfer. Nothing is debited. */
+export function rejectTransfer(store: Store, checker: User, transferId: string): CreateResult {
+  if (!checker.roles.includes("CHECKER")) return { ok: false, refusal: "NOT_A_CHECKER" };
+  expireOverdue(store, store.clock.now());
+  const transfer = store.transfers.find((t) => t.id === transferId && t.customerId === checker.customerId);
+  if (!transfer) return { ok: false, refusal: "TRANSFER_NOT_FOUND" };
+  if (transfer.status === "EXPIRED") return { ok: false, refusal: "EXPIRED" };
+  if (transfer.status !== "PENDING_APPROVAL") return { ok: false, refusal: "NOT_PENDING" };
+  transfer.status = "REJECTED";
+  writeAudit(store, checker, "REJECTED", transfer);
   return { ok: true, transfer };
 }
 

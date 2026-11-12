@@ -1,5 +1,6 @@
 import express, { type NextFunction, type Request, type Response } from "express";
-import { APPROVAL_REFUSAL_WORDS, approveTransfer, createCorporateTransfer, pendingForChecker } from "./approvals.js";
+import { APPROVAL_REFUSAL_WORDS, approveTransfer, createCorporateTransfer, pendingForChecker, rejectTransfer } from "./approvals.js";
+import { auditLogOf } from "./auditLog.js";
 import { BENEFICIARY_REFUSAL_WORDS, addBeneficiary } from "./beneficiaries.js";
 import type { Channel, Transfer, User } from "./model.js";
 import { DAILY_LIMIT, remainingToday, sentToday } from "./limits.js";
@@ -210,6 +211,19 @@ export function createApp(store: Store): express.Express {
     res.send(approvalsPage(store, req.user!));
   });
 
+  app.post("/approvals/:id/reject", signedIn, (req, res) => {
+    const result = rejectTransfer(store, req.user!, String(req.params.id));
+    if (!result.ok) return res.status(422).send(approvalsPage(store, req.user!, wordsFor(result.refusal)));
+    return res.send(approvalsPage(store, req.user!, undefined, `Rejected: ${result.transfer.reference}. Nothing was debited.`));
+  });
+
+  app.get("/audit", signedIn, (req, res) => {
+    const rows = auditLogOf(store, req.user!.customerId)
+      .map((e) => `<tr><td>${escapeHtml(e.at.toISOString())}</td><td>${escapeHtml(store.user(e.userId)?.name ?? e.userId)}</td><td>${e.action}</td><td>${escapeHtml(e.transferReference)}</td></tr>`)
+      .join("");
+    res.send(page("Audit log", `<section><table><tr><th>Time</th><th>User</th><th>Action</th><th>Transfer</th></tr>${rows}</table></section>`, req.user!.name));
+  });
+
   app.post("/approvals/:id/approve", signedIn, (req, res) => {
     const result = approveTransfer(store, req.user!, String(req.params.id));
     if (result.ok === "CODE_REQUIRED") return res.send(codeForm(req.user!, result.challengeId));
@@ -306,6 +320,18 @@ export function createApp(store: Store): express.Express {
     return res.json(result.transfer);
   });
 
+  app.post("/api/approvals/:id/reject", signedIn, (req, res) => {
+    const result = rejectTransfer(store, req.user!, String(req.params.id));
+    if (!result.ok) return res.status(422).json({ error: result.refusal });
+    return res.json(result.transfer);
+  });
+
+  // FAB-22: the company's audit log, read-only for its checkers.
+  app.get("/api/audit", signedIn, (req, res) => {
+    if (!req.user!.roles.includes("CHECKER")) return res.status(403).json({ error: "NOT_A_CHECKER" });
+    return res.json(auditLogOf(store, req.user!.customerId));
+  });
+
   app.get("/api/limits/today", signedIn, (req, res) => {
     const customer = store.customer(req.user!.customerId)!;
     if (customer.kind !== "RETAIL") return res.json({ limit: null });
@@ -352,7 +378,8 @@ function approvalsPage(store: Store, user: User, error?: string, notice?: string
   const rows = pendingForChecker(store, user)
     .map(
       (t) => `<tr><td>${escapeHtml(t.reference)}</td><td>${escapeHtml(store.user(t.userId)?.name ?? "")}</td><td>${escapeHtml(t.beneficiaryName)}</td><td>${formatMoney(t.amount)}</td><td>${escapeHtml(t.expiresAt?.toISOString() ?? "")}</td>
-        <td><form method="post" action="/approvals/${escapeHtml(t.id)}/approve"><button>Approve</button></form></td></tr>`,
+        <td><form method="post" action="/approvals/${escapeHtml(t.id)}/approve"><button>Approve</button></form>
+            <form method="post" action="/approvals/${escapeHtml(t.id)}/reject"><button>Reject</button></form></td></tr>`,
     )
     .join("");
   return page(
