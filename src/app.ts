@@ -3,8 +3,9 @@ import { BENEFICIARY_REFUSAL_WORDS, addBeneficiary } from "./beneficiaries.js";
 import type { Channel, User } from "./model.js";
 import { formatMoney } from "./money.js";
 import { removeBeneficiary } from "./removeBeneficiary.js";
+import { CODE_REFUSAL_WORDS, confirmCode, submitTransfer } from "./oneTimeCode.js";
 import type { Store } from "./store.js";
-import { REFUSAL_WORDS, quoteTransfer, sendTransfer, type TransferRequest } from "./transfers.js";
+import { REFUSAL_WORDS, quoteTransfer, type TransferRequest } from "./transfers.js";
 import { escapeHtml, page } from "./views.js";
 
 declare global {
@@ -140,7 +141,8 @@ export function createApp(store: Store): express.Express {
   });
 
   app.post("/transfer/send", signedIn, (req, res) => {
-    const result = sendTransfer(store, req.user!, transferRequestOf(req));
+    const result = submitTransfer(store, req.user!, transferRequestOf(req));
+    if (result.ok === "CODE_REQUIRED") return res.send(codeForm(req.user!, result.challengeId));
     if (!result.ok) return res.status(422).send(transferForm(store, req.user!, REFUSAL_WORDS[result.refusal]));
     const t = result.transfer;
     return res.send(
@@ -161,6 +163,32 @@ export function createApp(store: Store): express.Express {
     const result = addBeneficiary(store, req.user!, { name: String(req.body?.name ?? ""), iban: String(req.body?.iban ?? "") });
     if (!result.ok) return res.status(422).send(beneficiaryForm(req.user!, BENEFICIARY_REFUSAL_WORDS[result.refusal]));
     return res.redirect("/home");
+  });
+
+  app.post("/transfer/code", signedIn, (req, res) => {
+    const challengeId = String(req.body?.challengeId ?? "");
+    const result = confirmCode(store, req.user!, challengeId, String(req.body?.code ?? ""));
+    if (!result.ok) {
+      const words = result.refusal in CODE_REFUSAL_WORDS ? CODE_REFUSAL_WORDS[result.refusal as keyof typeof CODE_REFUSAL_WORDS] : REFUSAL_WORDS[result.refusal as keyof typeof REFUSAL_WORDS];
+      if (result.refusal === "CODE_WRONG") return res.status(422).send(codeForm(req.user!, challengeId, words));
+      return res.status(422).send(transferForm(store, req.user!, words));
+    }
+    const t = result.transfer;
+    return res.send(
+      page("Transfer sent", `<section><p class="notice">${formatMoney(t.amount)} sent to ${escapeHtml(t.beneficiaryName)}. Reference ${escapeHtml(t.reference)}.</p><p><a href="/home">Back to your accounts</a></p></section>`, req.user!.name),
+    );
+  });
+
+  // The demonstration's outbox: the messages that would go to the customer's registered phone.
+  app.get("/demo/messages", signedIn, (req, res) => {
+    const phone = store.customer(req.user!.customerId)?.phone;
+    const rows = store.outbox
+      .filter((m) => m.to === phone)
+      .slice()
+      .reverse()
+      .map((m) => `<tr><td>${escapeHtml(m.at.toISOString())}</td><td>${escapeHtml(m.text)}</td></tr>`)
+      .join("");
+    res.send(page("Messages to your phone (demo)", `<section><table><tr><th>Sent</th><th>Message</th></tr>${rows}</table></section>`, req.user!.name));
   });
 
   // The API the mobile app uses.
@@ -192,8 +220,15 @@ export function createApp(store: Store): express.Express {
   });
 
   app.post("/api/transfers", signedIn, (req, res) => {
-    const result = sendTransfer(store, req.user!, transferRequestOf(req));
+    const result = submitTransfer(store, req.user!, transferRequestOf(req));
+    if (result.ok === "CODE_REQUIRED") return res.status(202).json({ status: "CODE_REQUIRED", challengeId: result.challengeId });
     if (!result.ok) return res.status(422).json({ error: result.refusal });
+    return res.status(201).json(result.transfer);
+  });
+
+  app.post("/api/transfers/code", signedIn, (req, res) => {
+    const result = confirmCode(store, req.user!, String(req.body?.challengeId ?? ""), String(req.body?.code ?? ""));
+    if (!result.ok) return res.status(422).json({ error: result.refusal, ...("wrongCodesLeft" in result ? { wrongCodesLeft: result.wrongCodesLeft } : {}) });
     return res.status(201).json(result.transfer);
   });
 
@@ -202,6 +237,19 @@ export function createApp(store: Store): express.Express {
   });
 
   return app;
+}
+
+function codeForm(user: User, challengeId: string, error?: string): string {
+  return page(
+    "Enter your one-time code",
+    `${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+     <section><p>A transfer of 50,000 EGP or more needs the 6-digit code we sent to your registered phone. It is valid for 3 minutes.</p>
+     <form method="post" action="/transfer/code"><input type="hidden" name="challengeId" value="${escapeHtml(challengeId)}">
+       <label for="code">Code</label><input id="code" name="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" required>
+       <br><button>Send</button></form>
+     <p class="demo"><a href="/demo/messages">See the messages to your phone (demo)</a></p></section>`,
+    user.name,
+  );
 }
 
 function beneficiaryForm(user: User, error?: string): string {

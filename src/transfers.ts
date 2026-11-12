@@ -19,7 +19,8 @@ export type TransferRefusal =
   | "ACCOUNT_NOT_ACTIVE"
   | "BENEFICIARY_NOT_FOUND"
   | "INSUFFICIENT_BALANCE"
-  | "NEW_BENEFICIARY_CAP";
+  | "NEW_BENEFICIARY_CAP"
+  | "TRANSFERS_LOCKED";
 
 /** BRD 3.1 rule 14: what the confirmation screen shows before the customer confirms. */
 export interface TransferQuote {
@@ -41,6 +42,9 @@ export function maskIban(iban: string): string {
 
 /** Checks a request and prices it. Nothing is debited. */
 export function quoteTransfer(store: Store, user: User, request: TransferRequest): QuoteResult {
+  // BRD 4.2 rule 32: after three wrong one-time codes, transfers are locked for 15 minutes.
+  const lockedUntil = store.transferLocks.get(user.customerId);
+  if (lockedUntil && store.clock.now().getTime() < lockedUntil.getTime()) return { ok: false, refusal: "TRANSFERS_LOCKED" };
   const amount = parseAmount(request.amount);
   if (amount === null) return { ok: false, refusal: "AMOUNT_INVALID" };
   const account = store.accounts.find((a) => a.id === request.sourceAccountId && a.customerId === user.customerId);
@@ -93,4 +97,5 @@ export const REFUSAL_WORDS: Record<TransferRefusal, string> = {
   BENEFICIARY_NOT_FOUND: "Choose one of your beneficiaries.",
   INSUFFICIENT_BALANCE: "The amount and fee are more than the available balance. Nothing was debited.",
   NEW_BENEFICIARY_CAP: "For 24 hours after a beneficiary is added you can send them at most 10,000 EGP in total. For an urgent larger payment, please visit a branch.",
+  TRANSFERS_LOCKED: "Transfers are locked for 15 minutes after three wrong codes. Try again later.",
 };
