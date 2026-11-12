@@ -7,6 +7,7 @@ import { formatMoney } from "./money.js";
 import { removeBeneficiary } from "./removeBeneficiary.js";
 import { CODE_REFUSAL_WORDS, confirmCode, submitTransfer } from "./oneTimeCode.js";
 import type { Store } from "./store.js";
+import { STATEMENT_REFUSAL_WORDS, statementPdf, statementPeriod, statementRows } from "./statements.js";
 import { REFUSAL_WORDS, quoteTransfer, type TransferRequest } from "./transfers.js";
 import { escapeHtml, page } from "./views.js";
 
@@ -116,7 +117,7 @@ export function createApp(store: Store): express.Express {
       page(
         "Your accounts",
         `<section><table><tr><th>Account</th><th>IBAN</th><th>Balance</th><th>Status</th></tr>${accounts}</table>
-         <p><a href="/transfer">Send money</a>${user.roles.includes("CHECKER") ? ` · <a href="/approvals">Approvals</a>` : ""}</p></section>
+         <p><a href="/transfer">Send money</a> · <a href="/statement">Statement</a>${user.roles.includes("CHECKER") ? ` · <a href="/approvals">Approvals</a>` : ""}</p></section>
          <section><h2>Beneficiaries</h2><table><tr><th>Name</th><th>IBAN</th></tr>${beneficiaries}</table>
          <p><a href="/beneficiaries/new">Add a beneficiary</a></p></section>
          <section><h2>Transfers</h2><table><tr><th>Reference</th><th>To</th><th>Amount</th><th>Fee</th><th>Status</th></tr>${history}</table></section>`,
@@ -216,6 +217,24 @@ export function createApp(store: Store): express.Express {
     return res.send(approvalsPage(store, req.user!, undefined, `Approved and sent: ${result.transfer.reference}.`));
   });
 
+  // FAB-14: export a statement as PDF.
+  app.get("/statement", signedIn, (req, res) => {
+    res.send(statementForm(req.user!));
+  });
+
+  app.get("/statement.pdf", signedIn, async (req, res) => {
+    const period = statementPeriod(String(req.query.from ?? ""), String(req.query.to ?? ""));
+    if (typeof period === "string") {
+      if (req.accepts(["html", "json"]) === "json") return res.status(422).json({ error: period });
+      return res.status(422).send(statementForm(req.user!, STATEMENT_REFUSAL_WORDS[period]));
+    }
+    const customer = store.customer(req.user!.customerId)!;
+    const pdf = await statementPdf(customer.name, period, statementRows(store, req.user!, period));
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="cedar-pay-statement-${String(req.query.from)}-${String(req.query.to)}.pdf"`);
+    return res.send(pdf);
+  });
+
   // The demonstration's outbox: the messages that would go to the customer's registered phone.
   app.get("/demo/messages", signedIn, (req, res) => {
     const phone = store.customer(req.user!.customerId)?.phone;
@@ -299,6 +318,19 @@ export function createApp(store: Store): express.Express {
   });
 
   return app;
+}
+
+function statementForm(user: User, error?: string): string {
+  return page(
+    "Export a statement",
+    `${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+     <section><form method="get" action="/statement.pdf">
+       <label for="from">From</label><input id="from" name="from" type="date" required>
+       <label for="to">To</label><input id="to" name="to" type="date" required>
+       <br><button>Download PDF</button></form>
+     <p>Any period of up to 12 months.</p></section>`,
+    user.name,
+  );
 }
 
 /** FAB-13: the transfer timed out; the customer can retry it with the same reference. */

@@ -7,7 +7,7 @@ import type { Store } from "./store.js";
  * a retail customer can send at most 100,000 EGP in one calendar day, Cairo time.
  * The limit is per customer: all of the customer's accounts together, web and mobile together.
  */
-export const DAILY_LIMIT_EGP = 100_000;
+export const DAILY_LIMIT_EGP = 150_000;
 export const DAILY_LIMIT: Minor = egp(DAILY_LIMIT_EGP);
 
 const CAIRO_DAY = new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Cairo", year: "numeric", month: "2-digit", day: "2-digit" });
