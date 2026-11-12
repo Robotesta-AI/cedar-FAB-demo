@@ -60,7 +60,7 @@ export function quoteTransfer(store: Store, user: User, request: TransferRequest
   // BRD 4.1 rules 25-27: the daily limit, per customer, across accounts and channels.
   const customer = store.customer(user.customerId);
   if (customer && !withinDailyLimit(store, customer, amount, store.clock.now())) return { ok: false, refusal: "DAILY_LIMIT_EXCEEDED" };
-  const fee = transferFee(amount);
+  const fee = transferFee(amount, account.currency);
   const total = amount + fee;
   // BRD 3.1 rule 13: more than the available balance is refused and nothing is debited.
   if (total > account.balance) return { ok: false, refusal: "INSUFFICIENT_BALANCE" };
