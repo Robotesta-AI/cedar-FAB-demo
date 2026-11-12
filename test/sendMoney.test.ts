@@ -13,9 +13,10 @@ describe("FAB-6 send money to a saved beneficiary (BRD 3.1)", () => {
 
   it("rule 13: a transfer larger than the available balance is refused and nothing is debited", async () => {
     const { as, store } = demo();
-    const res = await as("U-LAILA").post("/api/transfers", { sourceAccountId: "A-1002", beneficiaryId: "B-1", amount: "150000.01" });
+    store.accounts.find((a) => a.id === "A-1002")!.balance = 50_000;
+    const res = await as("U-LAILA").post("/api/transfers", { sourceAccountId: "A-1002", beneficiaryId: "B-1", amount: "500.01" });
     expect(res.body.error).toBe("INSUFFICIENT_BALANCE");
-    expect(store.accounts.find((a) => a.id === "A-1002")!.balance).toBe(15_000_000);
+    expect(store.accounts.find((a) => a.id === "A-1002")!.balance).toBe(50_000);
     expect(store.transfers).toHaveLength(0);
   });
 
