@@ -1,5 +1,6 @@
 import type { Clock } from "./clock.js";
 import type { Account, Beneficiary, Customer, Transfer, User } from "./model.js";
+import type { CodeChallenge } from "./oneTimeCode.js";
 import { egp } from "./money.js";
 import type { Notification } from "./notifications.js";
 import { DEFAULT_SETTINGS, type Settings } from "./settings.js";
@@ -16,6 +17,11 @@ export class Store {
   transfers: Transfer[] = [];
   /** Notifications "sent" to customers (push, e-mail, SMS). A demonstration outbox: nothing leaves the app. */
   notifications: Notification[] = [];
+  codeChallenges: CodeChallenge[] = [];
+  /** Messages "sent" to customers' registered phones. A demonstration outbox: nothing leaves the app. */
+  outbox: { to: string; text: string; at: Date }[] = [];
+  /** BRD 4.2 rule 32: customers whose transfers are locked, until when. */
+  transferLocks = new Map<string, Date>();
   private sequence = 0;
 
   constructor(
