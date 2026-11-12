@@ -1,4 +1,5 @@
 import type { Clock } from "./clock.js";
+import { SimulatedCoreBanking } from "./coreBanking.js";
 import type { Account, Beneficiary, Customer, Transfer, User } from "./model.js";
 import type { CodeChallenge } from "./oneTimeCode.js";
 import { egp } from "./money.js";
@@ -22,6 +23,8 @@ export class Store {
   outbox: { to: string; text: string; at: Date }[] = [];
   /** BRD 4.2 rule 32: customers whose transfers are locked, until when. */
   transferLocks = new Map<string, Date>();
+  /** The core system that moves the money (FAB-13). */
+  core = new SimulatedCoreBanking();
   private sequence = 0;
 
   constructor(

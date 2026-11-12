@@ -12,6 +12,8 @@ export interface TransferRequest {
   beneficiaryId: string;
   amount: string;
   channel: Channel;
+  /** BRD 3.3 rule 20: the transfer's reference. Given on the confirmation; a retry sends the same one. */
+  reference?: string;
 }
 
 export type TransferRefusal =
@@ -22,7 +24,9 @@ export type TransferRefusal =
   | "INSUFFICIENT_BALANCE"
   | "NEW_BENEFICIARY_CAP"
   | "TRANSFERS_LOCKED"
-  | "DAILY_LIMIT_EXCEEDED";
+  | "DAILY_LIMIT_EXCEEDED"
+  | "TIMED_OUT"
+  | "REFERENCE_IN_USE";
 
 /** BRD 3.1 rule 14: what the confirmation screen shows before the customer confirms. */
 export interface TransferQuote {
@@ -35,7 +39,7 @@ export interface TransferQuote {
 }
 
 export type QuoteResult = { ok: true; quote: TransferQuote } | { ok: false; refusal: TransferRefusal };
-export type SendResult = { ok: true; transfer: Transfer } | { ok: false; refusal: TransferRefusal };
+export type SendResult = { ok: true; transfer: Transfer } | { ok: false; refusal: TransferRefusal; transfer?: Transfer };
 
 /** "EG28 **** **** **** **** **** 0001": the country, the check digits and the last four characters. */
 export function maskIban(iban: string): string {
@@ -67,16 +71,30 @@ export function quoteTransfer(store: Store, user: User, request: TransferRequest
   return { ok: true, quote: { account, beneficiary, maskedIban: maskIban(beneficiary.iban), amount, fee, total } };
 }
 
-/** Sends a transfer the customer confirmed (FAB-6): checks again, debits the amount and the fee, records it. */
+/** The transfer this customer already made with this reference, if any. */
+export function transferByReference(store: Store, customerId: string, reference: string | undefined): Transfer | undefined {
+  if (!reference) return undefined;
+  return store.transfers.find((t) => t.customerId === customerId && t.reference === reference);
+}
+
+const coreKey = (t: Transfer) => `${t.customerId}:${t.reference}`;
+
+/**
+ * Sends a transfer the customer confirmed (FAB-6): checks again, has the core post the amount and the fee, records it.
+ * FAB-13 (BRD 3.3): a transfer is identified by its reference. When the core does not answer in time the transfer is
+ * TIMED_OUT and the customer can retry it with the same reference; a retry never sends the money twice, and if the
+ * first attempt went through late, the retry returns that first attempt.
+ */
 export function sendTransfer(store: Store, user: User, request: TransferRequest): SendResult {
+  const existing = transferByReference(store, user.customerId, request.reference);
+  if (existing) return retryTransfer(store, user, existing, request);
   const quoted = quoteTransfer(store, user, request);
   if (!quoted.ok) return quoted;
   const { quote } = quoted;
   const now = store.clock.now();
-  quote.account.balance -= quote.total;
   const transfer: Transfer = {
     id: store.nextId("T"),
-    reference: store.nextId("CP"),
+    reference: request.reference || store.nextId("CP"),
     customerId: user.customerId,
     userId: user.id,
     sourceAccountId: quote.account.id,
@@ -86,15 +104,52 @@ export function sendTransfer(store: Store, user: User, request: TransferRequest)
     amount: quote.amount,
     fee: quote.fee,
     channel: request.channel,
-    status: "SENT",
+    status: "TIMED_OUT",
     createdAt: now,
-    sentAt: now,
+    sentAt: null,
     approvedBy: null,
     expiresAt: null,
   };
   store.transfers.push(transfer);
+  return post(store, transfer);
+}
+
+function post(store: Store, transfer: Transfer): SendResult {
+  const account = store.accounts.find((a) => a.id === transfer.sourceAccountId)!;
+  const outcome = store.core.post(coreKey(transfer), () => {
+    account.balance -= transfer.amount + transfer.fee;
+  });
+  if (outcome === "TIMEOUT") {
+    transfer.status = "TIMED_OUT";
+    return { ok: false, refusal: "TIMED_OUT", transfer };
+  }
+  transfer.status = "SENT";
+  transfer.sentAt = store.clock.now();
   notifyTransferSent(store, transfer);
   return { ok: true, transfer };
+}
+
+/** Rules 19-21: retry a transfer by its reference. */
+function retryTransfer(store: Store, user: User, transfer: Transfer, request: TransferRequest): SendResult {
+  if (transfer.userId !== user.id) return { ok: false, refusal: "REFERENCE_IN_USE" };
+  // Rule 20/21: already sent, or it went through late: return the first attempt, never send again.
+  if (transfer.status === "SENT") return { ok: true, transfer };
+  if (store.core.wasPosted(coreKey(transfer))) {
+    transfer.status = "SENT";
+    transfer.sentAt = transfer.sentAt ?? store.clock.now();
+    notifyTransferSent(store, transfer);
+    return { ok: true, transfer };
+  }
+  if (transfer.status !== "TIMED_OUT") return { ok: false, refusal: "REFERENCE_IN_USE" };
+  // The money did not move: check again (balance, limit, account) before posting.
+  const quoted = quoteTransfer(store, user, {
+    sourceAccountId: transfer.sourceAccountId,
+    beneficiaryId: transfer.beneficiaryId,
+    amount: (transfer.amount / 100).toFixed(2),
+    channel: request.channel,
+  });
+  if (!quoted.ok) return quoted;
+  return post(store, transfer);
 }
 
 export const REFUSAL_WORDS: Record<TransferRefusal, string> = {
@@ -105,5 +160,7 @@ export const REFUSAL_WORDS: Record<TransferRefusal, string> = {
   INSUFFICIENT_BALANCE: "The amount and fee are more than the available balance. Nothing was debited.",
   NEW_BENEFICIARY_CAP: "For 24 hours after a beneficiary is added you can send them at most 10,000 EGP in total. For an urgent larger payment, please visit a branch.",
   DAILY_LIMIT_EXCEEDED: "This transfer would take you above today's limit of 100,000 EGP across all your accounts, on web and mobile. Nothing was debited.",
+  TIMED_OUT: "The bank did not answer in time. Your transfer may not have been sent. Retry it: it will never be sent twice.",
+  REFERENCE_IN_USE: "This transfer reference is already in use. Start a new transfer.",
   TRANSFERS_LOCKED: "Transfers are locked for 15 minutes after three wrong codes. Try again later.",
 };
