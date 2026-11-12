@@ -15,11 +15,13 @@
     "test:ci": "vitest run --reporter=default --reporter=junit --outputFile.junit=test-results/junit.xml"
   },
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "pdfkit": "^0.17.2"
   },
   "devDependencies": {
     "@types/express": "^5.0.3",
     "@types/node": "^22.7.4",
+    "@types/pdfkit": "^0.17.7",
     "@types/supertest": "^6.0.3",
     "supertest": "^7.1.0",
     "tsx": "^4.19.2",
