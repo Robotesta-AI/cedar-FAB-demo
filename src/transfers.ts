@@ -89,6 +89,8 @@ export function sendTransfer(store: Store, user: User, request: TransferRequest)
     status: "SENT",
     createdAt: now,
     sentAt: now,
+    approvedBy: null,
+    expiresAt: null,
   };
   store.transfers.push(transfer);
   notifyTransferSent(store, transfer);

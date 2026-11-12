@@ -1,4 +1,5 @@
 import express, { type NextFunction, type Request, type Response } from "express";
+import { APPROVAL_REFUSAL_WORDS, approveTransfer, createCorporateTransfer, pendingForChecker } from "./approvals.js";
 import { BENEFICIARY_REFUSAL_WORDS, addBeneficiary } from "./beneficiaries.js";
 import type { Channel, User } from "./model.js";
 import { DAILY_LIMIT, remainingToday, sentToday } from "./limits.js";
@@ -41,6 +42,16 @@ function transferRequestOf(req: Request): TransferRequest {
     amount: String(body.amount ?? ""),
     channel: channelOf(req),
   };
+}
+
+/** The words for any refusal code. */
+function wordsFor(refusal: string): string {
+  const all: Record<string, string | undefined> = { ...REFUSAL_WORDS, ...CODE_REFUSAL_WORDS, ...APPROVAL_REFUSAL_WORDS };
+  return all[refusal] ?? "This could not be done.";
+}
+
+function isCorporate(store: Store, user: User): boolean {
+  return store.customer(user.customerId)?.kind === "CORPORATE";
 }
 
 export function createApp(store: Store): express.Express {
@@ -104,7 +115,7 @@ export function createApp(store: Store): express.Express {
       page(
         "Your accounts",
         `<section><table><tr><th>Account</th><th>IBAN</th><th>Balance</th><th>Status</th></tr>${accounts}</table>
-         <p><a href="/transfer">Send money</a></p></section>
+         <p><a href="/transfer">Send money</a>${user.roles.includes("CHECKER") ? ` · <a href="/approvals">Approvals</a>` : ""}</p></section>
          <section><h2>Beneficiaries</h2><table><tr><th>Name</th><th>IBAN</th></tr>${beneficiaries}</table>
          <p><a href="/beneficiaries/new">Add a beneficiary</a></p></section>
          <section><h2>Transfers</h2><table><tr><th>Reference</th><th>To</th><th>Amount</th><th>Fee</th><th>Status</th></tr>${history}</table></section>`,
@@ -142,6 +153,15 @@ export function createApp(store: Store): express.Express {
   });
 
   app.post("/transfer/send", signedIn, (req, res) => {
+    if (isCorporate(store, req.user!)) {
+      // FAB-12: a company transfer is created by a maker and waits for a checker.
+      const created = createCorporateTransfer(store, req.user!, transferRequestOf(req));
+      if (!created.ok) return res.status(422).send(transferForm(store, req.user!, wordsFor(created.refusal)));
+      const t = created.transfer;
+      return res.send(
+        page("Waiting for approval", `<section><p class="notice">${formatMoney(t.amount)} to ${escapeHtml(t.beneficiaryName)} is waiting for a checker's approval. Reference ${escapeHtml(t.reference)}. It expires in 48 hours if it is not approved.</p><p><a href="/home">Back to your accounts</a></p></section>`, req.user!.name),
+      );
+    }
     const result = submitTransfer(store, req.user!, transferRequestOf(req));
     if (result.ok === "CODE_REQUIRED") return res.send(codeForm(req.user!, result.challengeId));
     if (!result.ok) return res.status(422).send(transferForm(store, req.user!, REFUSAL_WORDS[result.refusal]));
@@ -170,7 +190,7 @@ export function createApp(store: Store): express.Express {
     const challengeId = String(req.body?.challengeId ?? "");
     const result = confirmCode(store, req.user!, challengeId, String(req.body?.code ?? ""));
     if (!result.ok) {
-      const words = result.refusal in CODE_REFUSAL_WORDS ? CODE_REFUSAL_WORDS[result.refusal as keyof typeof CODE_REFUSAL_WORDS] : REFUSAL_WORDS[result.refusal as keyof typeof REFUSAL_WORDS];
+      const words = wordsFor(result.refusal);
       if (result.refusal === "CODE_WRONG") return res.status(422).send(codeForm(req.user!, challengeId, words));
       return res.status(422).send(transferForm(store, req.user!, words));
     }
@@ -178,6 +198,18 @@ export function createApp(store: Store): express.Express {
     return res.send(
       page("Transfer sent", `<section><p class="notice">${formatMoney(t.amount)} sent to ${escapeHtml(t.beneficiaryName)}. Reference ${escapeHtml(t.reference)}.</p><p><a href="/home">Back to your accounts</a></p></section>`, req.user!.name),
     );
+  });
+
+  // FAB-12: the checker's list of the company's transfers waiting for approval.
+  app.get("/approvals", signedIn, (req, res) => {
+    res.send(approvalsPage(store, req.user!));
+  });
+
+  app.post("/approvals/:id/approve", signedIn, (req, res) => {
+    const result = approveTransfer(store, req.user!, String(req.params.id));
+    if (result.ok === "CODE_REQUIRED") return res.send(codeForm(req.user!, result.challengeId));
+    if (!result.ok) return res.status(422).send(approvalsPage(store, req.user!, wordsFor(result.refusal)));
+    return res.send(approvalsPage(store, req.user!, undefined, `Approved and sent: ${result.transfer.reference}.`));
   });
 
   // The demonstration's outbox: the messages that would go to the customer's registered phone.
@@ -221,6 +253,11 @@ export function createApp(store: Store): express.Express {
   });
 
   app.post("/api/transfers", signedIn, (req, res) => {
+    if (isCorporate(store, req.user!)) {
+      const created = createCorporateTransfer(store, req.user!, transferRequestOf(req));
+      if (!created.ok) return res.status(422).json({ error: created.refusal });
+      return res.status(201).json(created.transfer);
+    }
     const result = submitTransfer(store, req.user!, transferRequestOf(req));
     if (result.ok === "CODE_REQUIRED") return res.status(202).json({ status: "CODE_REQUIRED", challengeId: result.challengeId });
     if (!result.ok) return res.status(422).json({ error: result.refusal });
@@ -231,6 +268,17 @@ export function createApp(store: Store): express.Express {
     const result = confirmCode(store, req.user!, String(req.body?.challengeId ?? ""), String(req.body?.code ?? ""));
     if (!result.ok) return res.status(422).json({ error: result.refusal, ...("wrongCodesLeft" in result ? { wrongCodesLeft: result.wrongCodesLeft } : {}) });
     return res.status(201).json(result.transfer);
+  });
+
+  app.get("/api/approvals", signedIn, (req, res) => {
+    res.json(pendingForChecker(store, req.user!));
+  });
+
+  app.post("/api/approvals/:id/approve", signedIn, (req, res) => {
+    const result = approveTransfer(store, req.user!, String(req.params.id));
+    if (result.ok === "CODE_REQUIRED") return res.status(202).json({ status: "CODE_REQUIRED", challengeId: result.challengeId });
+    if (!result.ok) return res.status(422).json({ error: result.refusal });
+    return res.json(result.transfer);
   });
 
   app.get("/api/limits/today", signedIn, (req, res) => {
@@ -245,6 +293,21 @@ export function createApp(store: Store): express.Express {
   });
 
   return app;
+}
+
+function approvalsPage(store: Store, user: User, error?: string, notice?: string): string {
+  const rows = pendingForChecker(store, user)
+    .map(
+      (t) => `<tr><td>${escapeHtml(t.reference)}</td><td>${escapeHtml(store.user(t.userId)?.name ?? "")}</td><td>${escapeHtml(t.beneficiaryName)}</td><td>${formatMoney(t.amount)}</td><td>${escapeHtml(t.expiresAt?.toISOString() ?? "")}</td>
+        <td><form method="post" action="/approvals/${escapeHtml(t.id)}/approve"><button>Approve</button></form></td></tr>`,
+    )
+    .join("");
+  return page(
+    "Waiting for approval",
+    `${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}${notice ? `<p class="notice">${escapeHtml(notice)}</p>` : ""}
+     <section><table><tr><th>Reference</th><th>Created by</th><th>To</th><th>Amount</th><th>Expires</th><th></th></tr>${rows}</table></section>`,
+    user.name,
+  );
 }
 
 function codeForm(user: User, challengeId: string, error?: string): string {

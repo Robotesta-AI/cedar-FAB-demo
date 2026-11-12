@@ -1,5 +1,6 @@
 import { randomInt } from "node:crypto";
 import type { User } from "./model.js";
+import { approveTransfer, type ApprovalRefusal } from "./approvals.js";
 import { egp, type Minor } from "./money.js";
 import type { Store } from "./store.js";
 import { quoteTransfer, sendTransfer, type SendResult, type TransferRequest } from "./transfers.js";
@@ -16,7 +17,9 @@ export interface CodeChallenge {
   id: string;
   customerId: string;
   userId: string;
-  request: TransferRequest;
+  /** What the code releases: a transfer the customer asked for, or a company transfer a checker approves. */
+  request?: TransferRequest;
+  approveTransferId?: string;
   code: string;
   expiresAt: Date;
   wrongCodes: number;
@@ -27,19 +30,24 @@ export type SubmitResult = SendResult | { ok: "CODE_REQUIRED"; challengeId: stri
 
 export type CodeRefusal = "CODE_NOT_FOUND" | "CODE_WRONG" | "CODE_EXPIRED" | "CODE_ALREADY_USED" | "TRANSFER_CANCELLED";
 
-export type ConfirmResult = SendResult | { ok: false; refusal: CodeRefusal; wrongCodesLeft?: number };
+export type ConfirmResult = SendResult | { ok: false; refusal: CodeRefusal | ApprovalRefusal; wrongCodesLeft?: number };
 
 /** Sends the transfer, or asks for a one-time code first when the amount is at the threshold or above. */
 export function submitTransfer(store: Store, user: User, request: TransferRequest): SubmitResult {
   const quoted = quoteTransfer(store, user, request);
   if (!quoted.ok) return quoted;
   if (quoted.quote.amount < ONE_TIME_CODE_THRESHOLD) return sendTransfer(store, user, request);
+  return { ok: "CODE_REQUIRED", challengeId: issueCode(store, user, { request }) };
+}
+
+/** Creates a code for what it releases and sends it to the registered phone. Returns the challenge id. */
+export function issueCode(store: Store, user: User, releases: { request?: TransferRequest; approveTransferId?: string }): string {
   const now = store.clock.now();
   const challenge: CodeChallenge = {
     id: store.nextId("OTP"),
     customerId: user.customerId,
     userId: user.id,
-    request,
+    ...releases,
     code: String(randomInt(0, 1_000_000)).padStart(6, "0"),
     expiresAt: new Date(now.getTime() + CODE_VALID_MINUTES * 60_000),
     wrongCodes: 0,
@@ -49,7 +57,7 @@ export function submitTransfer(store: Store, user: User, request: TransferReques
   const phone = store.customer(user.customerId)?.phone ?? "";
   // Sent to the registered phone. In this demonstration the message goes to an outbox; nothing leaves the app.
   store.outbox.push({ to: phone, text: `Cedar Pay: your code is ${challenge.code}. It is valid for ${CODE_VALID_MINUTES} minutes.`, at: now });
-  return { ok: "CODE_REQUIRED", challengeId: challenge.id };
+  return challenge.id;
 }
 
 /** Checks the code the customer typed and, when right, sends the transfer it was issued for. */
@@ -70,7 +78,13 @@ export function confirmCode(store: Store, user: User, challengeId: string, code:
     return { ok: false, refusal: "CODE_WRONG", wrongCodesLeft: WRONG_CODES_ALLOWED - challenge.wrongCodes };
   }
   challenge.state = "USED";
-  return sendTransfer(store, user, challenge.request);
+  if (challenge.approveTransferId) {
+    const approved = approveTransfer(store, user, challenge.approveTransferId, { codeVerified: true });
+    // With the code verified, approval never asks for a code again.
+    if (approved.ok === "CODE_REQUIRED") return { ok: false, refusal: "CODE_NOT_FOUND" };
+    return approved;
+  }
+  return sendTransfer(store, user, challenge.request!);
 }
 
 export const CODE_REFUSAL_WORDS: Record<CodeRefusal, string> = {

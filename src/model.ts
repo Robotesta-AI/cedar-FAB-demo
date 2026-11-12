@@ -40,7 +40,8 @@ export interface Beneficiary {
   removedAt: Date | null;
 }
 
-export type TransferStatus = "SENT";
+/** A retail transfer is SENT at once; a corporate one waits for a checker (FAB-12). */
+export type TransferStatus = "SENT" | "PENDING_APPROVAL" | "EXPIRED";
 
 export interface Transfer {
   id: string;
@@ -57,4 +58,8 @@ export interface Transfer {
   status: TransferStatus;
   createdAt: Date;
   sentAt: Date | null;
+  /** Corporate transfers: the checker who approved it. */
+  approvedBy: string | null;
+  /** Corporate transfers: when an unapproved transfer expires. */
+  expiresAt: Date | null;
 }
