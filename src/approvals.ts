@@ -1,13 +1,13 @@
 import type { Transfer, User } from "./model.js";
 import { ONE_TIME_CODE_THRESHOLD, issueCode } from "./oneTimeCode.js";
-import { notifyTransferSent } from "./notifications.js";
+import { notifyTransferExpired, notifyTransferSent } from "./notifications.js";
 import type { Store } from "./store.js";
 import { quoteTransfer, type TransferRefusal, type TransferRequest } from "./transfers.js";
 
 /** BRD 6.1 rule 40: a transfer not approved within 48 hours expires and nothing is debited. */
 export const APPROVAL_WINDOW_HOURS = 48;
 
-export type ApprovalRefusal = TransferRefusal | "NOT_A_MAKER" | "NOT_A_CHECKER" | "TRANSFER_NOT_FOUND" | "NOT_PENDING" | "EXPIRED";
+export type ApprovalRefusal = TransferRefusal | "NOT_A_MAKER" | "NOT_A_CHECKER" | "TRANSFER_NOT_FOUND" | "NOT_PENDING" | "EXPIRED" | "REASON_REQUIRED";
 
 export type CreateResult = { ok: true; transfer: Transfer } | { ok: false; refusal: ApprovalRefusal };
 export type ApproveResult = { ok: true; transfer: Transfer } | { ok: "CODE_REQUIRED"; challengeId: string } | { ok: false; refusal: ApprovalRefusal };
@@ -15,7 +15,11 @@ export type ApproveResult = { ok: true; transfer: Transfer } | { ok: "CODE_REQUI
 /** Marks the company's unapproved transfers that are past their 48 hours as EXPIRED (rule 40). */
 export function expireOverdue(store: Store, now: Date): void {
   for (const t of store.transfers) {
-    if (t.status === "PENDING_APPROVAL" && t.expiresAt && now.getTime() > t.expiresAt.getTime()) t.status = "EXPIRED";
+    if (t.status === "PENDING_APPROVAL" && t.expiresAt && now.getTime() > t.expiresAt.getTime()) {
+      t.status = "EXPIRED";
+      // Criterion 4: the maker is told.
+      notifyTransferExpired(store, t, store.user(t.userId)?.name ?? "the maker");
+    }
   }
 }
 
@@ -69,14 +73,36 @@ export function approveTransfer(store: Store, checker: User, transferId: string,
   if (transfer.amount >= ONE_TIME_CODE_THRESHOLD && !options.codeVerified) {
     return { ok: "CODE_REQUIRED", challengeId: issueCode(store, checker, { approveTransferId: transfer.id }) };
   }
-  const account = store.accounts.find((a) => a.id === transfer.sourceAccountId);
-  if (!account || account.status !== "ACTIVE") return { ok: false, refusal: "ACCOUNT_NOT_ACTIVE" };
-  if (transfer.amount + transfer.fee > account.balance) return { ok: false, refusal: "INSUFFICIENT_BALANCE" };
+  // Criterion 5: the rules are checked at the moment of approval, not only at creation (account, beneficiary, limit,
+  // balance; the one-time code above).
+  const quoted = quoteTransfer(store, checker, {
+    sourceAccountId: transfer.sourceAccountId,
+    beneficiaryId: transfer.beneficiaryId,
+    amount: (transfer.amount / 100).toFixed(2),
+    channel: transfer.channel,
+  });
+  if (!quoted.ok) return quoted;
+  const account = quoted.quote.account;
   account.balance -= transfer.amount + transfer.fee;
   transfer.status = "SENT";
   transfer.sentAt = now;
   transfer.approvedBy = checker.id;
   notifyTransferSent(store, transfer);
+  return { ok: true, transfer };
+}
+
+/** Criterion 2: a checker rejects a pending corporate transfer with a reason. Nothing is debited. */
+export function rejectTransfer(store: Store, checker: User, transferId: string, reason: string): CreateResult {
+  if (!checker.roles.includes("CHECKER")) return { ok: false, refusal: "NOT_A_CHECKER" };
+  const why = reason.trim();
+  if (why.length === 0) return { ok: false, refusal: "REASON_REQUIRED" };
+  expireOverdue(store, store.clock.now());
+  const transfer = store.transfers.find((t) => t.id === transferId && t.customerId === checker.customerId);
+  if (!transfer) return { ok: false, refusal: "TRANSFER_NOT_FOUND" };
+  if (transfer.status === "EXPIRED") return { ok: false, refusal: "EXPIRED" };
+  if (transfer.status !== "PENDING_APPROVAL") return { ok: false, refusal: "NOT_PENDING" };
+  transfer.status = "REJECTED";
+  transfer.rejectionReason = why.slice(0, 500);
   return { ok: true, transfer };
 }
 
@@ -86,4 +112,5 @@ export const APPROVAL_REFUSAL_WORDS: Partial<Record<ApprovalRefusal, string>> = 
   TRANSFER_NOT_FOUND: "This transfer was not found.",
   NOT_PENDING: "This transfer is not waiting for approval.",
   EXPIRED: "This transfer was not approved within 48 hours and has expired. Nothing was debited.",
+  REASON_REQUIRED: "Say why you reject this transfer.",
 };

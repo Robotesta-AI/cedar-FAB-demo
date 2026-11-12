@@ -35,3 +35,12 @@ export function notifyTransferSent(store: Store, transfer: Transfer): void {
   deliver(store, "EMAIL", transfer, text);
   if (store.settings.smsNotifications) sendSms(store, transfer, text);
 }
+
+/**
+ * FAB-12 criterion 4: the maker is told when their corporate transfer expired without approval. A push notification
+ * to the company, once per transfer.
+ */
+export function notifyTransferExpired(store: Store, transfer: Transfer, makerName: string): void {
+  const text = `Cedar Pay: ${formatMoney(transfer.amount)} to ${transfer.beneficiaryName} (created by ${makerName}) expired without approval. Reference ${transfer.reference}. Nothing was debited.`;
+  deliver(store, "PUSH", transfer, text);
+}
