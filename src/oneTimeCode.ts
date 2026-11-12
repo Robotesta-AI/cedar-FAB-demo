@@ -3,7 +3,7 @@ import type { User } from "./model.js";
 import { approveTransfer, type ApprovalRefusal } from "./approvals.js";
 import { egp, type Minor } from "./money.js";
 import type { Store } from "./store.js";
-import { quoteTransfer, sendTransfer, type SendResult, type TransferRequest } from "./transfers.js";
+import { quoteTransfer, sendTransfer, transferByReference, type SendResult, type TransferRequest } from "./transfers.js";
 
 /** BRD 4.2 rule 30: a transfer of 50,000 EGP or more needs a one-time code. Regulated: no exception. */
 export const ONE_TIME_CODE_THRESHOLD: Minor = egp(50_000);
@@ -34,6 +34,8 @@ export type ConfirmResult = SendResult | { ok: false; refusal: CodeRefusal | App
 
 /** Sends the transfer, or asks for a one-time code first when the amount is at the threshold or above. */
 export function submitTransfer(store: Store, user: User, request: TransferRequest): SubmitResult {
+  // FAB-13: a retry of a transfer already made (its code already typed) goes straight to the retry.
+  if (transferByReference(store, user.customerId, request.reference)) return sendTransfer(store, user, request);
   const quoted = quoteTransfer(store, user, request);
   if (!quoted.ok) return quoted;
   if (quoted.quote.amount < ONE_TIME_CODE_THRESHOLD) return sendTransfer(store, user, request);

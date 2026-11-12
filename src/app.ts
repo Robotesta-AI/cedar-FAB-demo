@@ -1,7 +1,7 @@
 import express, { type NextFunction, type Request, type Response } from "express";
 import { APPROVAL_REFUSAL_WORDS, approveTransfer, createCorporateTransfer, pendingForChecker } from "./approvals.js";
 import { BENEFICIARY_REFUSAL_WORDS, addBeneficiary } from "./beneficiaries.js";
-import type { Channel, User } from "./model.js";
+import type { Channel, Transfer, User } from "./model.js";
 import { DAILY_LIMIT, remainingToday, sentToday } from "./limits.js";
 import { formatMoney } from "./money.js";
 import { removeBeneficiary } from "./removeBeneficiary.js";
@@ -41,6 +41,7 @@ function transferRequestOf(req: Request): TransferRequest {
     beneficiaryId: String(body.beneficiaryId ?? ""),
     amount: String(body.amount ?? ""),
     channel: channelOf(req),
+    ...(typeof body.reference === "string" && body.reference !== "" ? { reference: body.reference } : {}),
   };
 }
 
@@ -133,7 +134,8 @@ export function createApp(store: Store): express.Express {
     const result = quoteTransfer(store, req.user!, request);
     if (!result.ok) return res.status(422).send(transferForm(store, req.user!, REFUSAL_WORDS[result.refusal]));
     const { quote } = result;
-    const hidden = Object.entries(request)
+    // FAB-13: the reference is fixed here, so a retry after a timeout is the same transfer.
+    const hidden = Object.entries({ ...request, reference: request.reference ?? store.nextId("CP") })
       .filter(([k]) => k !== "channel")
       .map(([k, v]) => `<input type="hidden" name="${k}" value="${escapeHtml(v)}">`)
       .join("");
@@ -164,6 +166,7 @@ export function createApp(store: Store): express.Express {
     }
     const result = submitTransfer(store, req.user!, transferRequestOf(req));
     if (result.ok === "CODE_REQUIRED") return res.send(codeForm(req.user!, result.challengeId));
+    if (!result.ok && result.refusal === "TIMED_OUT" && result.transfer) return res.status(504).send(retryPage(req.user!, result.transfer));
     if (!result.ok) return res.status(422).send(transferForm(store, req.user!, REFUSAL_WORDS[result.refusal]));
     const t = result.transfer;
     return res.send(
@@ -189,6 +192,7 @@ export function createApp(store: Store): express.Express {
   app.post("/transfer/code", signedIn, (req, res) => {
     const challengeId = String(req.body?.challengeId ?? "");
     const result = confirmCode(store, req.user!, challengeId, String(req.body?.code ?? ""));
+    if (!result.ok && result.refusal === "TIMED_OUT" && "transfer" in result && result.transfer) return res.status(504).send(retryPage(req.user!, result.transfer));
     if (!result.ok) {
       const words = wordsFor(result.refusal);
       if (result.refusal === "CODE_WRONG") return res.status(422).send(codeForm(req.user!, challengeId, words));
@@ -260,12 +264,14 @@ export function createApp(store: Store): express.Express {
     }
     const result = submitTransfer(store, req.user!, transferRequestOf(req));
     if (result.ok === "CODE_REQUIRED") return res.status(202).json({ status: "CODE_REQUIRED", challengeId: result.challengeId });
+    if (!result.ok && result.refusal === "TIMED_OUT") return res.status(504).json({ error: "TIMED_OUT", reference: result.transfer?.reference });
     if (!result.ok) return res.status(422).json({ error: result.refusal });
     return res.status(201).json(result.transfer);
   });
 
   app.post("/api/transfers/code", signedIn, (req, res) => {
     const result = confirmCode(store, req.user!, String(req.body?.challengeId ?? ""), String(req.body?.code ?? ""));
+    if (!result.ok && result.refusal === "TIMED_OUT") return res.status(504).json({ error: "TIMED_OUT", reference: "transfer" in result ? result.transfer?.reference : undefined });
     if (!result.ok) return res.status(422).json({ error: result.refusal, ...("wrongCodesLeft" in result ? { wrongCodesLeft: result.wrongCodesLeft } : {}) });
     return res.status(201).json(result.transfer);
   });
@@ -293,6 +299,21 @@ export function createApp(store: Store): express.Express {
   });
 
   return app;
+}
+
+/** FAB-13: the transfer timed out; the customer can retry it with the same reference. */
+function retryPage(user: User, t: Transfer): string {
+  const fields = { sourceAccountId: t.sourceAccountId, beneficiaryId: t.beneficiaryId, amount: (t.amount / 100).toFixed(2), reference: t.reference };
+  const hidden = Object.entries(fields)
+    .map(([k, v]) => `<input type="hidden" name="${k}" value="${escapeHtml(v)}">`)
+    .join("");
+  return page(
+    "The bank did not answer in time",
+    `<section><p class="error">${escapeHtml(REFUSAL_WORDS.TIMED_OUT)}</p>
+     <p>Transfer ${escapeHtml(t.reference)}: ${formatMoney(t.amount)} to ${escapeHtml(t.beneficiaryName)}.</p>
+     <form method="post" action="/transfer/send">${hidden}<button>Retry</button></form></section>`,
+    user.name,
+  );
 }
 
 function approvalsPage(store: Store, user: User, error?: string, notice?: string): string {
