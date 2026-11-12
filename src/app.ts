@@ -1,4 +1,5 @@
 import express, { type NextFunction, type Request, type Response } from "express";
+import { BENEFICIARY_REFUSAL_WORDS, addBeneficiary } from "./beneficiaries.js";
 import type { Channel, User } from "./model.js";
 import { formatMoney } from "./money.js";
 import { removeBeneficiary } from "./removeBeneficiary.js";
@@ -102,7 +103,8 @@ export function createApp(store: Store): express.Express {
         "Your accounts",
         `<section><table><tr><th>Account</th><th>IBAN</th><th>Balance</th><th>Status</th></tr>${accounts}</table>
          <p><a href="/transfer">Send money</a></p></section>
-         <section><h2>Beneficiaries</h2><table><tr><th>Name</th><th>IBAN</th></tr>${beneficiaries}</table></section>
+         <section><h2>Beneficiaries</h2><table><tr><th>Name</th><th>IBAN</th></tr>${beneficiaries}</table>
+         <p><a href="/beneficiaries/new">Add a beneficiary</a></p></section>
          <section><h2>Transfers</h2><table><tr><th>Reference</th><th>To</th><th>Amount</th><th>Fee</th><th>Status</th></tr>${history}</table></section>`,
         user.name,
       ),
@@ -151,7 +153,27 @@ export function createApp(store: Store): express.Express {
     res.redirect("/home");
   });
 
+  app.get("/beneficiaries/new", signedIn, (req, res) => {
+    res.send(beneficiaryForm(req.user!));
+  });
+
+  app.post("/beneficiaries", signedIn, (req, res) => {
+    const result = addBeneficiary(store, req.user!, { name: String(req.body?.name ?? ""), iban: String(req.body?.iban ?? "") });
+    if (!result.ok) return res.status(422).send(beneficiaryForm(req.user!, BENEFICIARY_REFUSAL_WORDS[result.refusal]));
+    return res.redirect("/home");
+  });
+
   // The API the mobile app uses.
+  app.get("/api/beneficiaries", signedIn, (req, res) => {
+    res.json(store.beneficiariesOf(req.user!.customerId));
+  });
+
+  app.post("/api/beneficiaries", signedIn, (req, res) => {
+    const result = addBeneficiary(store, req.user!, { name: String(req.body?.name ?? ""), iban: String(req.body?.iban ?? "") });
+    if (!result.ok) return res.status(422).json({ error: result.refusal });
+    return res.status(201).json(result.beneficiary);
+  });
+
   app.delete("/api/beneficiaries/:id", signedIn, (req, res) => {
     const removed = removeBeneficiary(store, req.user!, String(req.params.id));
     if (!removed) return res.status(404).json({ error: "BENEFICIARY_NOT_FOUND" });
@@ -180,6 +202,18 @@ export function createApp(store: Store): express.Express {
   });
 
   return app;
+}
+
+function beneficiaryForm(user: User, error?: string): string {
+  return page(
+    "Add a beneficiary",
+    `${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+     <section><form method="post" action="/beneficiaries">
+       <label for="name">Name</label><input id="name" name="name" maxlength="70" required>
+       <label for="iban">IBAN</label><input id="iban" name="iban" placeholder="EG.. .... .... .... .... .... ...." required>
+       <br><button>Add</button></form></section>`,
+    user.name,
+  );
 }
 
 function transferForm(store: Store, user: User, error?: string): string {
